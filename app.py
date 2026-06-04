@@ -23,10 +23,14 @@ st.set_page_config(
 )
 
 BASE_DIR = Path(__file__).parent
-CSV_PATH = BASE_DIR / "civil_consulting_qa_all.csv"
+
+# GitHub 업로드 제한 때문에 CSV 원본이 아니라 zip 파일을 사용함
+# zip 안에는 civil_consulting_qa_all.csv 전체 데이터가 그대로 들어 있어야 함
+ZIP_PATH = BASE_DIR / "civil_consulting_qa_all.zip"
+
 FAISS_DIR = BASE_DIR / "civil_streamlit_faiss_db_all"
 
-# 사용자가 요청한 대로 전체 데이터 사용
+# 전체 데이터 사용
 MAX_ROWS = None
 
 
@@ -37,7 +41,7 @@ MAX_ROWS = None
 def set_openai_api_key():
     """
     로컬 실행:
-    - C:\ARG\.env 파일의 OPENAI_API_KEY 사용
+    - C:\\ARG\\deploy\\.env 파일의 OPENAI_API_KEY 사용
     - 또는 Windows 환경변수 OPENAI_API_KEY 사용
 
     Streamlit Cloud 배포:
@@ -64,7 +68,7 @@ def set_openai_api_key():
     # 4. 둘 다 없으면 안내 후 중단
     st.error(
         "OPENAI_API_KEY가 설정되어 있지 않습니다. "
-        "로컬에서는 C:\\ARG\\.env 파일에 OPENAI_API_KEY를 저장하고, "
+        "로컬에서는 .env 파일에 OPENAI_API_KEY를 저장하고, "
         "배포 시에는 Streamlit Cloud의 Secrets에 OPENAI_API_KEY를 등록하세요."
     )
     st.stop()
@@ -162,11 +166,12 @@ st.markdown(
 
 @st.cache_data(show_spinner=False)
 def load_data():
-    if not CSV_PATH.exists():
-        st.error(f"데이터 파일을 찾을 수 없습니다: {CSV_PATH.name}")
+    if not ZIP_PATH.exists():
+        st.error(f"데이터 압축 파일을 찾을 수 없습니다: {ZIP_PATH.name}")
         st.stop()
 
-    df = pd.read_csv(CSV_PATH)
+    # zip 안의 CSV 전체 데이터를 읽음
+    df = pd.read_csv(ZIP_PATH, compression="zip")
 
     required_cols = [
         "data_group",
