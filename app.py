@@ -1,4 +1,5 @@
 import os
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -22,16 +23,15 @@ st.set_page_config(
     layout="wide",
 )
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.resolve()
 
-# GitHub 업로드 제한 때문에 CSV 원본이 아니라 zip 파일을 사용함
-# zip 안에는 civil_consulting_qa_all.csv 전체 데이터가 그대로 들어 있어야 함
 ZIP_PATH = BASE_DIR / "civil_consulting_qa_all.zip"
-
 FAISS_DIR = BASE_DIR / "civil_streamlit_faiss_db_all"
 
-# 전체 데이터 사용
-MAX_ROWS = None
+# 중요:
+# Streamlit Cloud에서 전체 데이터를 바로 임베딩하면 앱이 죽을 수 있음.
+# 배포 테스트는 1000개로 먼저 성공 확인 후 3000, 5000처럼 늘리는 방식 추천.
+MAX_ROWS = 1000
 
 
 # =========================================
@@ -41,37 +41,37 @@ MAX_ROWS = None
 def set_openai_api_key():
     """
     로컬 실행:
-    - C:\\ARG\\deploy\\.env 파일의 OPENAI_API_KEY 사용
-    - 또는 Windows 환경변수 OPENAI_API_KEY 사용
+    - app.py와 같은 폴더의 .env 파일 사용 가능
+    - 또는 시스템 환경변수 OPENAI_API_KEY 사용 가능
 
     Streamlit Cloud 배포:
-    - App settings > Secrets에 아래 형식으로 등록
+    - Manage app > Settings > Secrets에 아래 형식으로 등록
       OPENAI_API_KEY = "sk-..."
     """
 
-    # 1. 로컬 .env 파일 먼저 읽기
     load_dotenv(BASE_DIR / ".env")
 
-    # 2. .env 또는 시스템 환경변수에 API Key가 있으면 사용
-    if os.getenv("OPENAI_API_KEY"):
-        return
+    api_key = None
 
-    # 3. Streamlit Cloud Secrets 확인
-    # secrets.toml이 없는 로컬 환경에서는 st.secrets 접근 자체가 오류를 낼 수 있으므로 try로 처리
+    # 1순위: Streamlit Cloud Secrets
     try:
-        if "OPENAI_API_KEY" in st.secrets:
-            os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
-            return
+        api_key = st.secrets["OPENAI_API_KEY"]
     except Exception:
-        pass
+        api_key = None
 
-    # 4. 둘 다 없으면 안내 후 중단
-    st.error(
-        "OPENAI_API_KEY가 설정되어 있지 않습니다. "
-        "로컬에서는 .env 파일에 OPENAI_API_KEY를 저장하고, "
-        "배포 시에는 Streamlit Cloud의 Secrets에 OPENAI_API_KEY를 등록하세요."
-    )
-    st.stop()
+    # 2순위: 로컬 .env 또는 시스템 환경변수
+    if not api_key:
+        api_key = os.getenv("OPENAI_API_KEY")
+
+    if not api_key:
+        st.error(
+            "OPENAI_API_KEY가 설정되어 있지 않습니다.\n\n"
+            "Streamlit Cloud에서는 Manage app > Settings > Secrets에 다음 형식으로 등록하세요.\n\n"
+            'OPENAI_API_KEY = "sk-..."'
+        )
+        st.stop()
+
+    os.environ["OPENAI_API_KEY"] = api_key
 
 
 set_openai_api_key()
@@ -167,11 +167,31 @@ st.markdown(
 @st.cache_data(show_spinner=False)
 def load_data():
     if not ZIP_PATH.exists():
-        st.error(f"데이터 압축 파일을 찾을 수 없습니다: {ZIP_PATH.name}")
+        st.error(
+            f"데이터 압축 파일을 찾을 수 없습니다: {ZIP_PATH.name}\n\n"
+            "GitHub에 civil_consulting_qa_all.zip 파일이 app.py와 같은 위치에 있는지 확인하세요."
+        )
         st.stop()
 
-    # zip 안의 CSV 전체 데이터를 읽음
-    df = pd.read_csv(ZIP_PATH, compression="zip")
+    try:
+        with zipfile.ZipFile(ZIP_PATH, "r") as z:
+            csv_files = [
+                name for name in z.namelist()
+                if name.lower().endswith(".csv")
+            ]
+
+            if not csv_files:
+                st.error("zip 파일 안에 CSV 파일이 없습니다.")
+                st.stop()
+
+            csv_name = csv_files[0]
+
+            with z.open(csv_name) as f:
+                df = pd.read_csv(f)
+
+    except Exception as e:
+        st.error(f"데이터 파일을 읽는 중 오류가 발생했습니다: {e}")
+        st.stop()
 
     required_cols = [
         "data_group",
@@ -219,16 +239,23 @@ def load_data():
 
 @st.cache_resource(show_spinner=False)
 def create_or_load_vectorstore():
-    embedding = OpenAIEmbeddings(model="text-embedding-3-small")
+    embedding = OpenAIEmbeddings(
+        model="text-embedding-3-small"
+    )
 
-    # Streamlit Cloud에서도 앱 컨테이너 내부에 저장 가능
     if FAISS_DIR.exists():
-        vectorstore = FAISS.load_local(
-            str(FAISS_DIR),
-            embedding,
-            allow_dangerous_deserialization=True,
-        )
-        return vectorstore
+        try:
+            vectorstore = FAISS.load_local(
+                str(FAISS_DIR),
+                embedding,
+                allow_dangerous_deserialization=True,
+            )
+            return vectorstore
+        except Exception as e:
+            st.warning(
+                f"기존 FAISS 벡터DB를 불러오는 중 오류가 발생했습니다: {e}\n\n"
+                "벡터DB를 다시 생성합니다."
+            )
 
     df = load_data()
 
@@ -250,14 +277,30 @@ def create_or_load_vectorstore():
             )
         )
 
-    vectorstore = FAISS.from_documents(
-        documents=documents,
-        embedding=embedding,
-    )
+    if not documents:
+        st.error("벡터DB를 만들 문서가 없습니다. CSV 데이터 내용을 확인하세요.")
+        st.stop()
 
-    vectorstore.save_local(str(FAISS_DIR))
+    try:
+        vectorstore = FAISS.from_documents(
+            documents=documents,
+            embedding=embedding,
+        )
 
-    return vectorstore
+        vectorstore.save_local(str(FAISS_DIR))
+
+        return vectorstore
+
+    except Exception as e:
+        st.error(
+            f"FAISS 벡터DB 생성 중 오류가 발생했습니다: {e}\n\n"
+            "가능한 원인:\n"
+            "1. OPENAI_API_KEY가 잘못되었거나 결제/사용량 문제가 있음\n"
+            "2. 데이터 수가 너무 많아 Streamlit Cloud에서 처리 시간이 초과됨\n"
+            "3. faiss-cpu 또는 langchain 관련 패키지 설치 문제\n\n"
+            "우선 MAX_ROWS 값을 500 또는 1000으로 낮춰 테스트하세요."
+        )
+        st.stop()
 
 
 # =========================================
@@ -319,8 +362,10 @@ def retrieve_documents(vectorstore, query, k=4):
 
 def trim_text(text, max_chars=3500):
     text = str(text)
+
     if len(text) > max_chars:
         return text[:max_chars] + "\n...[일부 생략]"
+
     return text
 
 
@@ -480,7 +525,10 @@ if run_button:
         st.warning("질문을 입력하세요.")
         st.stop()
 
-    with st.spinner("전체 공공 민원 데이터를 기반으로 유사 상담 사례를 검색하고 답변을 생성하는 중입니다. 첫 실행은 벡터DB 생성 때문에 오래 걸릴 수 있습니다..."):
+    with st.spinner(
+        "공공 민원 데이터를 기반으로 유사 상담 사례를 검색하고 답변을 생성하는 중입니다. "
+        "첫 실행은 벡터DB 생성 때문에 시간이 걸릴 수 있습니다..."
+    ):
         vectorstore = create_or_load_vectorstore()
         docs = retrieve_documents(vectorstore, user_question, k=search_k)
         answer = generate_answer(user_question, docs)
