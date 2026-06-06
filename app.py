@@ -28,10 +28,7 @@ BASE_DIR = Path(__file__).parent.resolve()
 ZIP_PATH = BASE_DIR / "civil_consulting_qa_all.zip"
 FAISS_DIR = BASE_DIR / "civil_streamlit_faiss_db_all"
 
-# 중요:
-# Streamlit Cloud에서 전체 데이터를 바로 임베딩하면 앱이 죽을 수 있음.
-# 배포 테스트는 1000개로 먼저 성공 확인 후 3000, 5000처럼 늘리는 방식 추천.
-MAX_ROWS = 1000
+MAX_ROWS = None
 
 
 # =========================================
@@ -317,7 +314,7 @@ def create_or_load_vectorstore():
             "1. OPENAI_API_KEY가 잘못되었거나 결제/사용량 문제가 있음\n"
             "2. 데이터 수가 너무 많아 Streamlit Cloud에서 처리 시간이 초과됨\n"
             "3. faiss-cpu 또는 langchain 관련 패키지 설치 문제\n\n"
-            "우선 MAX_ROWS 값을 500 또는 1000으로 낮춰 테스트하세요."
+        
         )
         st.stop()
 
