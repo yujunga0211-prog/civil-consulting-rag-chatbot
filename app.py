@@ -149,6 +149,25 @@ st.markdown(
         font-size: 14px;
     }
 
+    .answer-card {
+        background: rgba(255, 255, 255, 0.96);
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
+        padding: 18px;
+        min-height: 360px;
+        line-height: 1.7;
+        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
+        white-space: pre-wrap;
+    }
+
+    .rag-card {
+        border-top: 6px solid #2563eb;
+    }
+
+    .llm-card {
+        border-top: 6px solid #f97316;
+    }
+
     .small-note {
         color: #64748b;
         font-size: 13px;
@@ -439,6 +458,50 @@ def generate_answer(query, docs):
     )
 
 
+def generate_llm_answer(query):
+    """
+    검색 문서 없이 LLM만으로 생성하는 비교용 답변.
+    교수님 요구사항: UI에서 RAG 결과와 LLM 결과를 나란히 보여 주기 위한 함수.
+    """
+    prompt = ChatPromptTemplate.from_template(
+        """
+당신은 공공 민원 상담원 교육을 돕는 AI 코치입니다.
+
+아래 질문에 대해 검색 문서 없이 일반 LLM 지식만으로 답변하세요.
+이 답변은 RAG 기반 답변과 비교하기 위한 검증용 답변입니다.
+
+중요 규칙:
+- 실제 기관명으로 자신을 소개하지 마세요.
+- 검색 근거가 없으므로 구체적인 서류, 기간, 법령, 신청 장소를 확정적으로 단정하지 마세요.
+- 불확실한 내용은 "확인이 필요하다", "담당 기관 확인이 필요하다"처럼 조심스럽게 표현하세요.
+- 답변은 신입 상담원이 참고할 수 있는 응대 예시 형식으로 작성하세요.
+- 답변은 한국어로 작성하세요.
+
+답변은 다음 형식을 따르세요.
+
+## 일반 LLM 응대 예시
+- 검색 문서 없이 생성한 일반적인 응대 예시를 작성하세요.
+
+## 주의할 점
+- 이 답변은 검색된 과거 상담 사례에 근거하지 않았으므로 실제 상담에서는 추가 확인이 필요하다는 점을 설명하세요.
+
+[상담원이 입력한 질문]
+{question}
+
+[일반 LLM 답변]
+"""
+    )
+
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.2,
+    )
+
+    chain = prompt | llm | StrOutputParser()
+
+    return chain.invoke({"question": query})
+
+
 # =========================================
 # 8. Streamlit 화면
 # =========================================
@@ -489,8 +552,8 @@ with col1:
 <div class="info-card">
     <h3>서비스 핵심 기능</h3>
     <p>· 유사한 과거 민원 상담 사례 검색</p>
-    <p>· 상담원 응대 예시 자동 생성</p>
-    <p>· 답변 구조 분석 및 학습 포인트 제공</p>
+    <p>· RAG 기반 답변과 일반 LLM 답변 비교 출력</p>
+    <p>· 상담원 응대 예시 및 학습 포인트 제공</p>
     <p>· 검색 근거 사례를 함께 출력하여 RAG 구조 확인</p>
 </div>
 """,
@@ -511,13 +574,8 @@ with col1:
     run_button = st.button("질문하기", type="primary", use_container_width=True)
 
 with col2:
-    st.markdown("### RAG 답변")
-
-    if "last_answer" not in st.session_state:
-        st.session_state.last_answer = "답변이 여기에 표시됩니다."
-
-    answer_placeholder = st.empty()
-    answer_placeholder.markdown(st.session_state.last_answer)
+    st.markdown("### 답변 비교")
+    st.info("질문을 입력하면 RAG 기반 답변과 일반 LLM 답변이 나란히 표시됩니다.")
 
 
 if run_button:
@@ -526,17 +584,44 @@ if run_button:
         st.stop()
 
     with st.spinner(
-        "공공 민원 데이터를 기반으로 유사 상담 사례를 검색하고 답변을 생성하는 중입니다. "
+        "공공 민원 데이터를 기반으로 RAG 답변과 일반 LLM 답변을 생성하는 중입니다. "
         "첫 실행은 벡터DB 생성 때문에 시간이 걸릴 수 있습니다..."
     ):
         vectorstore = create_or_load_vectorstore()
         docs = retrieve_documents(vectorstore, user_question, k=search_k)
-        answer = generate_answer(user_question, docs)
+        rag_answer = generate_answer(user_question, docs)
+        llm_answer = generate_llm_answer(user_question)
 
-    st.session_state.last_answer = answer
-    answer_placeholder.markdown(answer)
+    st.markdown("## 답변 비교")
+
+    rag_col, llm_col = st.columns(2)
+
+    with rag_col:
+        st.markdown("### RAG 기반 답변")
+        st.caption("검색된 과거 상담 사례를 근거로 생성한 답변")
+        st.markdown(
+            f"""
+<div class="answer-card rag-card">
+{rag_answer}
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    with llm_col:
+        st.markdown("### 일반 LLM 답변")
+        st.caption("검색 문서 없이 LLM만으로 생성한 비교용 답변")
+        st.markdown(
+            f"""
+<div class="answer-card llm-card">
+{llm_answer}
+</div>
+""",
+            unsafe_allow_html=True,
+        )
 
     st.markdown("### 검색된 유사 상담 사례")
+    st.caption("RAG 기반 답변 생성에 실제로 사용된 검색 근거입니다.")
 
     for i, doc in enumerate(docs, start=1):
         metadata = doc.metadata
