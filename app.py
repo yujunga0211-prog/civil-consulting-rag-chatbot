@@ -203,7 +203,10 @@ def load_data():
             csv_name = csv_files[0]
 
             with z.open(csv_name) as f:
-                df = pd.read_csv(f)
+                if MAX_ROWS is not None:
+                    df = pd.read_csv(f, nrows=MAX_ROWS)
+                else:
+                    df = pd.read_csv(f)
 
     except Exception as e:
         st.error(f"데이터 파일을 읽는 중 오류가 발생했습니다: {e}")
