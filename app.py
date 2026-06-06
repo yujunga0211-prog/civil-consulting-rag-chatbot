@@ -6,9 +6,11 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -24,10 +26,11 @@ st.set_page_config(
 )
 
 BASE_DIR = Path(__file__).parent.resolve()
-
 ZIP_PATH = BASE_DIR / "civil_consulting_qa_all.zip"
-FAISS_DIR = BASE_DIR / "civil_streamlit_faiss_db_all"
 
+# 전체 데이터 사용
+# 단, 전체 데이터를 OpenAI Embedding으로 임베딩하지 않고
+# TF-IDF로 전체 검색 후 상위 문서만 LLM에 전달함.
 MAX_ROWS = None
 
 
@@ -134,18 +137,6 @@ st.markdown(
         color: white;
     }
 
-    .source-card {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-left: 5px solid #2563eb;
-        border-radius: 16px;
-        padding: 18px;
-        margin-top: 12px;
-        line-height: 1.65;
-        color: #334155;
-        font-size: 14px;
-    }
-
     .answer-card {
         background: rgba(255, 255, 255, 0.96);
         border: 1px solid #e2e8f0;
@@ -163,6 +154,18 @@ st.markdown(
 
     .llm-card {
         border-top: 6px solid #f97316;
+    }
+
+    .source-card {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-left: 5px solid #2563eb;
+        border-radius: 16px;
+        padding: 18px;
+        margin-top: 12px;
+        line-height: 1.65;
+        color: #334155;
+        font-size: 14px;
     }
 
     .small-note {
@@ -246,80 +249,28 @@ def load_data():
     df = df[df["rag_text"].astype(str).str.len() >= 50]
     df = df.reset_index(drop=True)
 
-    if MAX_ROWS is not None:
-        df = df.head(MAX_ROWS)
-
     return df
 
 
 # =========================================
-# 5. FAISS 벡터DB 생성/로드
+# 5. 전체 데이터 TF-IDF 검색 인덱스
 # =========================================
 
 @st.cache_resource(show_spinner=False)
-def create_or_load_vectorstore():
-    embedding = OpenAIEmbeddings(
-        model="text-embedding-3-small"
-    )
-
-    if FAISS_DIR.exists():
-        try:
-            vectorstore = FAISS.load_local(
-                str(FAISS_DIR),
-                embedding,
-                allow_dangerous_deserialization=True,
-            )
-            return vectorstore
-        except Exception as e:
-            st.warning(
-                f"기존 FAISS 벡터DB를 불러오는 중 오류가 발생했습니다: {e}\n\n"
-                "벡터DB를 다시 생성합니다."
-            )
-
+def create_tfidf_index():
     df = load_data()
 
-    documents = []
+    # 전체 데이터를 대상으로 검색하되, OpenAI Embedding 비용/시간을 줄이기 위해 TF-IDF 사용
+    vectorizer = TfidfVectorizer(
+        max_features=80000,
+        ngram_range=(1, 2),
+        min_df=1,
+        max_df=0.95,
+    )
 
-    for _, row in df.iterrows():
-        metadata = {
-            "data_group": str(row.get("data_group", "")),
-            "source": str(row.get("source", "")),
-            "consulting_category": str(row.get("consulting_category", "")),
-            "question": str(row.get("question", "")),
-            "answer": str(row.get("answer", "")),
-        }
+    tfidf_matrix = vectorizer.fit_transform(df["rag_text"].astype(str))
 
-        documents.append(
-            Document(
-                page_content=str(row["rag_text"]),
-                metadata=metadata,
-            )
-        )
-
-    if not documents:
-        st.error("벡터DB를 만들 문서가 없습니다. CSV 데이터 내용을 확인하세요.")
-        st.stop()
-
-    try:
-        vectorstore = FAISS.from_documents(
-            documents=documents,
-            embedding=embedding,
-        )
-
-        vectorstore.save_local(str(FAISS_DIR))
-
-        return vectorstore
-
-    except Exception as e:
-        st.error(
-            f"FAISS 벡터DB 생성 중 오류가 발생했습니다: {e}\n\n"
-            "가능한 원인:\n"
-            "1. OPENAI_API_KEY가 잘못되었거나 결제/사용량 문제가 있음\n"
-            "2. 데이터 수가 너무 많아 Streamlit Cloud에서 처리 시간이 초과됨\n"
-            "3. faiss-cpu 또는 langchain 관련 패키지 설치 문제\n\n"
-        
-        )
-        st.stop()
+    return df, vectorizer, tfidf_matrix
 
 
 # =========================================
@@ -332,23 +283,25 @@ def expand_query(query):
         "신분증": "주민등록증 신분증 발급 주민센터",
         "주민등록증": "주민등록증 신분증 발급 주민센터",
 
-        "대출": "대출 신용보증재단 보증재단 지역신용보증재단 소상공인 개인사업자 정책자금",
-        "보증재단": "신용보증재단 지역신용보증재단 보증서 대출 소상공인",
-        "신용보증재단": "신용보증재단 지역신용보증재단 보증서 대출 소상공인",
-        "소상공인": "소상공인 개인사업자 창업 대출 정책자금 지원",
-        "개인사업자": "개인사업자 소상공인 사업자등록 대출 신용보증재단",
+        "대출": "대출 신용보증재단 보증재단 지역신용보증재단 소상공인 개인사업자 정책자금 창업자금 보증서",
+        "보증재단": "신용보증재단 지역신용보증재단 보증서 대출 소상공인 개인사업자",
+        "신용보증재단": "신용보증재단 지역신용보증재단 보증서 대출 소상공인 개인사업자 창업대출",
+        "소상공인": "소상공인 개인사업자 창업 대출 정책자금 지원 신용보증재단",
+        "개인사업자": "개인사업자 소상공인 사업자등록 대출 신용보증재단 정책자금",
         "정책자금": "정책자금 소상공인 대출 창업자금 신용보증재단",
 
-        "퇴직": "퇴직 임금 수당 급여 근로기준법 고용노동부",
-        "임금": "임금 수당 퇴직 급여 근로기준법 고용노동부",
+        "퇴직": "퇴직 임금 수당 급여 근로기준법 고용노동부 금품청산",
+        "임금": "임금 수당 퇴직 급여 근로기준법 고용노동부 금품청산",
         "수당": "임금 수당 퇴직 급여 근로기준법 고용노동부",
-        "급여": "급여 임금 수당 퇴직 근로기준법",
+        "급여": "급여 임금 수당 퇴직 근로기준법 금품청산",
 
-        "장애인기업": "장애인기업확인서 장애인기업 확인서 발급 창업 중소벤처기업부",
+        "장애인기업": "장애인기업확인서 장애인기업 확인서 발급 창업 중소벤처기업부 공공구매",
         "확인서": "확인서 발급 서류 절차 신청 장애인기업확인서",
 
         "자동차": "자동차 등록 이전등록 자동차등록원부 사용본거지",
+        "이전등록": "자동차 이전등록 자동차 등록 사용본거지 자동차등록원부",
         "부동산": "부동산 공인중개사 계약서 직거래 행정사",
+        "직거래": "부동산 직거래 계약서 공인중개사 행정사",
     }
 
     expanded = query
@@ -364,18 +317,37 @@ def expand_query(query):
 # 7. RAG 검색/생성
 # =========================================
 
-def retrieve_documents(vectorstore, query, k=4):
+def retrieve_documents_tfidf(query, k=4):
+    df, vectorizer, tfidf_matrix = create_tfidf_index()
+
     expanded_query = expand_query(query)
 
-    retriever = vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs={
-            "k": k,
-            "fetch_k": 20,
-        },
-    )
+    query_vec = vectorizer.transform([expanded_query])
+    scores = cosine_similarity(query_vec, tfidf_matrix).flatten()
 
-    docs = retriever.invoke(expanded_query)
+    top_indices = scores.argsort()[::-1][:k]
+
+    docs = []
+
+    for idx in top_indices:
+        row = df.iloc[idx]
+
+        metadata = {
+            "data_group": str(row.get("data_group", "")),
+            "source": str(row.get("source", "")),
+            "consulting_category": str(row.get("consulting_category", "")),
+            "question": str(row.get("question", "")),
+            "answer": str(row.get("answer", "")),
+            "score": float(scores[idx]),
+        }
+
+        docs.append(
+            Document(
+                page_content=str(row["rag_text"]),
+                metadata=metadata,
+            )
+        )
+
     return docs
 
 
@@ -394,7 +366,7 @@ def format_docs(docs):
     )
 
 
-def generate_answer(query, docs):
+def generate_rag_answer(query, docs):
     context = format_docs(docs)
 
     prompt = ChatPromptTemplate.from_template(
@@ -512,8 +484,8 @@ st.markdown(
     <div class="badge">RAG 기반 상담 교육 보조 시스템</div>
     <div class="main-title">공공 민원 상담원<br>응대 지원 챗봇</div>
     <div class="subtitle">
-        일반 시민에게 최신 민원 정답을 직접 제공하는 서비스가 아니라,<br>
-        신입 공공 민원 상담원이 과거 상담 사례를 참고해 공손한 말투와 답변 구조를 학습할 수 있도록 돕는 서비스입니다.
+        전체 공공 민원 상담 데이터를 대상으로 유사 사례를 검색하고,<br>
+        RAG 기반 답변과 일반 LLM 답변을 나란히 비교할 수 있는 서비스입니다.
     </div>
 </div>
 """,
@@ -551,7 +523,7 @@ with col1:
         """
 <div class="info-card">
     <h3>서비스 핵심 기능</h3>
-    <p>· 유사한 과거 민원 상담 사례 검색</p>
+    <p>· 전체 공공 민원 데이터 대상 TF-IDF 기반 유사 사례 검색</p>
     <p>· RAG 기반 답변과 일반 LLM 답변 비교 출력</p>
     <p>· 상담원 응대 예시 및 학습 포인트 제공</p>
     <p>· 검색 근거 사례를 함께 출력하여 RAG 구조 확인</p>
@@ -584,12 +556,10 @@ if run_button:
         st.stop()
 
     with st.spinner(
-        "공공 민원 데이터를 기반으로 RAG 답변과 일반 LLM 답변을 생성하는 중입니다. "
-        "첫 실행은 벡터DB 생성 때문에 시간이 걸릴 수 있습니다..."
+        "전체 공공 민원 데이터를 대상으로 유사 상담 사례를 검색하고, RAG/LLM 답변을 생성하는 중입니다..."
     ):
-        vectorstore = create_or_load_vectorstore()
-        docs = retrieve_documents(vectorstore, user_question, k=search_k)
-        rag_answer = generate_answer(user_question, docs)
+        docs = retrieve_documents_tfidf(user_question, k=search_k)
+        rag_answer = generate_rag_answer(user_question, docs)
         llm_answer = generate_llm_answer(user_question)
 
     st.markdown("## 답변 비교")
@@ -598,7 +568,7 @@ if run_button:
 
     with rag_col:
         st.markdown("### RAG 기반 답변")
-        st.caption("검색된 과거 상담 사례를 근거로 생성한 답변")
+        st.caption("전체 데이터에서 검색된 과거 상담 사례를 근거로 생성한 답변")
         st.markdown(
             f"""
 <div class="answer-card rag-card">
@@ -627,7 +597,7 @@ if run_button:
         metadata = doc.metadata
 
         with st.expander(
-            f"사례 {i} | {metadata.get('source', '')} / {metadata.get('consulting_category', '')}",
+            f"사례 {i} | {metadata.get('source', '')} / {metadata.get('consulting_category', '')} | 유사도 {metadata.get('score', 0):.4f}",
             expanded=(i == 1),
         ):
             st.markdown(
@@ -636,6 +606,7 @@ if run_button:
 <b>기관구분:</b> {metadata.get("data_group", "")}<br>
 <b>기관명:</b> {metadata.get("source", "")}<br>
 <b>상담분야:</b> {metadata.get("consulting_category", "")}<br>
+<b>검색 유사도:</b> {metadata.get("score", 0):.4f}<br>
 <b>기존 질문:</b> {metadata.get("question", "")}<br>
 <b>기존 답변:</b> {metadata.get("answer", "")}<br>
 </div>
