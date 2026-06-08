@@ -2,5 +2,6 @@
 venv/
 __pycache__/
 *.pyc
-civil_streamlit_faiss_db_all/
 .streamlit/secrets.toml
+civil_consulting_qa_all.csv
+civil_streamlit_faiss_db_all/
